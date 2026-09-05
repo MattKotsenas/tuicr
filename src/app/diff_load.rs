@@ -830,8 +830,14 @@ impl App {
     /// Reloads diff files from disk. Returns `(file_count, invalidated_count)` where
     /// `invalidated_count` is the number of previously reviewed files whose content changed.
     pub fn reload_diff_files(&mut self) -> Result<(usize, usize)> {
+        self.last_reload_persistence_failed = false;
         let diff_files = self.fetch_diff_files()?;
-        Ok(self.apply_diff_files(diff_files))
+        let outcome = self.apply_diff_files(diff_files);
+        if !Self::is_strict_commit_selection(self.commit_selection_range, self.review_commits.len())
+        {
+            self.persist_diff_reconciliation()?;
+        }
+        Ok(outcome)
     }
 
     /// Returns the freshly fetched diff only when it differs from what is
@@ -1079,6 +1085,8 @@ impl App {
         let (tx, rx) = std::sync::mpsc::channel();
         self.diff_watch_reload = Some(DiffWatchReload {
             request: request.clone(),
+            base_fingerprint: current,
+            base_persisted_at: self.persisted_session_snapshot.updated_at,
             rx,
         });
         let reporter = DiffWatchReporter::new(tx, request.clone());
@@ -1167,6 +1175,8 @@ impl App {
         let Some(in_flight) = self.diff_watch_reload.as_ref() else {
             return false;
         };
+        let base_fingerprint = in_flight.base_fingerprint;
+        let base_persisted_at = in_flight.base_persisted_at;
         let event = match in_flight.rx.try_recv() {
             Ok(event) => event,
             Err(std::sync::mpsc::TryRecvError::Empty) => return false,
@@ -1213,7 +1223,13 @@ impl App {
             }
             Ok(Some(diff_files)) => {
                 self.last_diff_watch_error = None;
-                self.apply_watched_diff(diff_files)
+                if diff_files_fingerprint(&self.diff_files) != base_fingerprint
+                    || self.persisted_session_snapshot.updated_at != base_persisted_at
+                {
+                    false
+                } else {
+                    self.apply_watched_diff(diff_files)
+                }
             }
             Err(err) => {
                 let text = format!("Diff watch failed: {err}");
@@ -1241,7 +1257,13 @@ impl App {
         if diff_files_fingerprint(&diff_files) == diff_files_fingerprint(&self.diff_files) {
             return false;
         }
+        self.last_reload_persistence_failed = false;
         let (count, invalidated) = self.apply_diff_files(diff_files);
+        if !Self::is_strict_commit_selection(self.commit_selection_range, self.review_commits.len())
+            && self.persist_diff_reconciliation().is_err()
+        {
+            return true;
+        }
         match invalidated {
             0 => self.set_message(format!("Reloaded {count} files")),
             changed => self.set_message(format!(
@@ -1599,7 +1621,7 @@ fn file_fingerprint(file: &DiffFile) -> u64 {
 /// compares two lists as sets, which is required because the stored list is
 /// sorted by directory and a freshly fetched one is not (see
 /// `sort_files_by_directory`).
-fn diff_files_fingerprint(files: &[DiffFile]) -> u64 {
+pub(in crate::app) fn diff_files_fingerprint(files: &[DiffFile]) -> u64 {
     let mut per_file: Vec<u64> = files.iter().map(file_fingerprint).collect();
     per_file.sort_unstable();
     let mut hasher = crate::hash::Fnv1aHasher::new();

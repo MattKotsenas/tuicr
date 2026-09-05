@@ -536,11 +536,14 @@ fn main() -> anyhow::Result<()> {
                         match key.code {
                             crossterm::event::KeyCode::Char('Z') => {
                                 // ZZ: save session, export, and quit (same as :wq)
-                                let _ = app.save_current_session_merging_external();
-                                if app.session.has_comments() {
-                                    handler::handle_export_and_quit(&mut app);
-                                } else {
-                                    app.should_quit = true;
+                                match app.save_current_session_merging_external() {
+                                    Ok(_) if app.session.has_comments() => {
+                                        handler::handle_export_and_quit(&mut app);
+                                    }
+                                    Ok(_) => app.should_quit = true,
+                                    Err(error) => {
+                                        app.set_error(format!("Save failed: {error}"));
+                                    }
                                 }
                                 continue;
                             }
@@ -766,11 +769,10 @@ fn main() -> anyhow::Result<()> {
                                                 target.path.display()
                                             ));
                                         }
-                                        Err(err) => {
-                                            app.set_error(format!(
-                                                "Reload after editor failed: {err}"
-                                            ));
+                                        Err(err) if !app.last_reload_persistence_failed() => {
+                                            app.set_error(err.to_string())
                                         }
+                                        Err(_) => {}
                                     }
                                 } else {
                                     app.set_message(format!("Opened {}", target.path.display()));

@@ -916,6 +916,8 @@ pub enum DiffWatchReloadEvent {
 #[derive(Debug)]
 pub struct DiffWatchReload {
     pub request: DiffWatchReloadRequest,
+    pub base_fingerprint: u64,
+    pub base_persisted_at: chrono::DateTime<Utc>,
     pub rx: std::sync::mpsc::Receiver<DiffWatchReloadEvent>,
 }
 
@@ -1289,6 +1291,9 @@ pub struct App {
 
     pub should_quit: bool,
     pub dirty: bool,
+    pub(crate) session_save_failed: bool,
+    pub(crate) session_save_conflict: bool,
+    pub(crate) last_reload_persistence_failed: bool,
     pub quit_warned: bool,
     pub message: Option<Message>,
     pub pending_confirm: Option<ConfirmAction>,

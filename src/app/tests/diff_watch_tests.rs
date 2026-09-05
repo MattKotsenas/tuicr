@@ -1,6 +1,7 @@
+use super::TestReviewsDir;
 use crate::app::diff_load::{
-    CommitSelectionAnchor, DiffWatchReporter, DiffWatchTick, diff_watch_result_is_stale,
-    normalize_diff_watch_result,
+    CommitSelectionAnchor, DiffWatchReporter, DiffWatchTick, diff_files_fingerprint,
+    diff_watch_result_is_stale, normalize_diff_watch_result,
 };
 use crate::app::*;
 use crate::forge::traits::{ForgeRepository, PrSessionKey};
@@ -164,7 +165,12 @@ fn working_tree_request() -> DiffWatchReloadRequest {
 fn deliver(app: &mut App, request: DiffWatchReloadRequest, event: DiffWatchReloadEvent) -> bool {
     let (tx, rx) = mpsc::channel();
     tx.send(event).unwrap();
-    app.diff_watch_reload = Some(DiffWatchReload { request, rx });
+    app.diff_watch_reload = Some(DiffWatchReload {
+        request,
+        base_fingerprint: diff_files_fingerprint(&app.diff_files),
+        base_persisted_at: app.persisted_session_snapshot.updated_at,
+        rx,
+    });
     app.poll_diff_watch_changes()
 }
 
@@ -326,6 +332,8 @@ fn should_not_spawn_a_second_reload_while_one_is_in_flight() {
     let (_tx, rx) = mpsc::channel();
     app.diff_watch_reload = Some(DiffWatchReload {
         request: in_flight.clone(),
+        base_fingerprint: diff_files_fingerprint(&app.diff_files),
+        base_persisted_at: app.persisted_session_snapshot.updated_at,
         rx,
     });
 
@@ -351,6 +359,8 @@ fn should_report_a_failure_when_the_worker_panics() {
     let (tx, rx) = mpsc::channel::<DiffWatchReloadEvent>();
     app.diff_watch_reload = Some(DiffWatchReload {
         request: working_tree_request(),
+        base_fingerprint: diff_files_fingerprint(&app.diff_files),
+        base_persisted_at: app.persisted_session_snapshot.updated_at,
         rx,
     });
 
@@ -394,6 +404,8 @@ fn should_clear_in_flight_state_when_the_worker_dies_without_answering() {
     let (tx, rx) = mpsc::channel::<DiffWatchReloadEvent>();
     app.diff_watch_reload = Some(DiffWatchReload {
         request: working_tree_request(),
+        base_fingerprint: diff_files_fingerprint(&app.diff_files),
+        base_persisted_at: app.persisted_session_snapshot.updated_at,
         rx,
     });
     drop(tx);
@@ -558,6 +570,40 @@ fn should_unmark_a_reviewed_file_when_a_watch_tick_changes_it() {
         Some("Reloaded 1 files, 1 changed since last review"),
         "the count in the message is how the user learns a mark came off"
     );
+}
+
+#[test]
+fn should_persist_review_invalidation_from_a_watch_tick() {
+    let _reviews = TestReviewsDir::new();
+    let initial = make_diff_file("a.rs", 1);
+    let mut app = build_app(vec![initial.clone()], DiffSource::WorkingTree);
+    app.session
+        .get_file_mut(initial.display_path())
+        .expect("file should be registered")
+        .reviewed = true;
+    let session_path = app
+        .save_current_session_merging_external()
+        .expect("initial session should save");
+
+    deliver(
+        &mut app,
+        working_tree_request(),
+        DiffWatchReloadEvent::Done {
+            request: working_tree_request(),
+            result: Ok(Some(vec![make_diff_file("a.rs", 2)])),
+            change_status: None,
+            commits: None,
+        },
+    );
+
+    let persisted = crate::persistence::storage::load_session(&session_path)
+        .expect("persisted session should load");
+    let review = persisted
+        .files
+        .get(initial.display_path())
+        .expect("file should remain registered");
+    assert_eq!(review.content_hash, Some(2));
+    assert!(!review.reviewed);
 }
 
 /// The counterpart, and what makes the test above mean anything: clearing
@@ -751,6 +797,58 @@ fn should_discard_result_that_matches_what_is_already_on_screen() {
         app.message.is_none(),
         "a result matching the screen must not report a reload"
     );
+}
+
+#[test]
+fn should_discard_result_when_screen_changed_after_watch_started() {
+    let mut app = build_app(vec![make_diff_file("a.rs", 1)], DiffSource::WorkingTree);
+    let request = working_tree_request();
+    let (tx, rx) = mpsc::channel();
+    tx.send(DiffWatchReloadEvent::Done {
+        request: request.clone(),
+        result: Ok(Some(vec![make_diff_file("a.rs", 2)])),
+        change_status: None,
+        commits: None,
+    })
+    .unwrap();
+    app.diff_watch_reload = Some(DiffWatchReload {
+        request,
+        base_fingerprint: diff_files_fingerprint(&app.diff_files),
+        base_persisted_at: app.persisted_session_snapshot.updated_at,
+        rx,
+    });
+    app.diff_files = vec![make_diff_file("a.rs", 3)];
+
+    let redraw = app.poll_diff_watch_changes();
+
+    assert!(!redraw);
+    assert_eq!(app.diff_files[0].content_hash, 3);
+}
+
+#[test]
+fn should_discard_result_when_persisted_session_changed_after_watch_started() {
+    let mut app = build_app(vec![make_diff_file("a.rs", 1)], DiffSource::WorkingTree);
+    let request = working_tree_request();
+    let (tx, rx) = mpsc::channel();
+    tx.send(DiffWatchReloadEvent::Done {
+        request: request.clone(),
+        result: Ok(Some(vec![make_diff_file("a.rs", 3)])),
+        change_status: None,
+        commits: None,
+    })
+    .unwrap();
+    app.diff_watch_reload = Some(DiffWatchReload {
+        request,
+        base_fingerprint: diff_files_fingerprint(&app.diff_files),
+        base_persisted_at: app.persisted_session_snapshot.updated_at,
+        rx,
+    });
+    app.persisted_session_snapshot.updated_at += chrono::Duration::seconds(1);
+
+    let redraw = app.poll_diff_watch_changes();
+
+    assert!(!redraw);
+    assert_eq!(app.diff_files[0].content_hash, 1);
 }
 
 /// `apply_diff_files`'s cursor capture is only correct when nothing has

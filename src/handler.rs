@@ -456,6 +456,18 @@ pub fn handle_export_and_quit(app: &mut App) {
     app.should_quit = true;
 }
 
+pub fn handle_write_and_quit(app: &mut App) {
+    match app.save_current_session_merging_external() {
+        Ok(_) if app.session.has_comments() && app.output_to_stdout => handle_export(app),
+        Ok(_) if app.session.has_comments() => {
+            app.exit_command_mode();
+            app.enter_confirm_mode(app::ConfirmAction::CopyAndQuit);
+        }
+        Ok(_) => app.should_quit = true,
+        Err(error) => app.set_error(format!("Save failed: {error}")),
+    }
+}
+
 fn comment_line_start(buffer: &str, cursor: usize) -> usize {
     let cursor = cursor.min(buffer.len());
     match buffer[..cursor].rfind('\n') {
@@ -820,7 +832,7 @@ impl CompletionResult {
 fn dispatch_command(app: &mut App, kind: CommandKind) -> CommandAfterDispatch {
     match kind {
         CommandKind::Quit => {
-            if app.dirty && app.session.has_comments() {
+            if app.dirty && (app.session.has_comments() || app.session_save_failed()) {
                 app.set_error("No write since last change (add ! to override)");
             } else if app.dirty {
                 // Dirty from reviewed-file markers only: discard the state and
@@ -845,22 +857,9 @@ fn dispatch_command(app: &mut App, kind: CommandKind) -> CommandAfterDispatch {
             CommandAfterDispatch::ExitCommandMode
         }
         CommandKind::WriteQuit => {
-            match app.save_current_session_merging_external() {
-                Ok(_) => {
-                    if app.session.has_comments() {
-                        if app.output_to_stdout {
-                            // Skip confirmation dialog, export directly.
-                            handle_export(app);
-                        } else {
-                            app.exit_command_mode();
-                            app.enter_confirm_mode(app::ConfirmAction::CopyAndQuit);
-                            return CommandAfterDispatch::KeepMode;
-                        }
-                    } else {
-                        app.should_quit = true;
-                    }
-                }
-                Err(e) => app.set_error(format!("Save failed: {e}")),
+            handle_write_and_quit(app);
+            if app.input_mode == InputMode::Confirm {
+                return CommandAfterDispatch::KeepMode;
             }
             CommandAfterDispatch::ExitCommandMode
         }
@@ -999,11 +998,7 @@ fn dispatch_command(app: &mut App, kind: CommandKind) -> CommandAfterDispatch {
 }
 
 fn reload_review(app: &mut App) {
-    let comment_reload = app.reload_persisted_session_if_changed(true);
     if matches!(app.diff_source, app::DiffSource::PullRequest(_)) {
-        if let Err(e) = comment_reload {
-            app.set_warning(format!("Comment reload failed: {e}"));
-        }
         // Async: shows a spinner in the status bar; result is applied in
         // `poll_pr_reload_events` and the cursor is restored to the captured
         // anchor.
@@ -1011,7 +1006,9 @@ fn reload_review(app: &mut App) {
             app.set_error(format!("Reload failed: {e}"));
         }
     } else {
-        match app.reload_diff_files() {
+        let diff_reload = app.reload_diff_files();
+        let comment_reload = app.reload_persisted_session_if_changed(true);
+        match diff_reload {
             Ok((count, invalidated)) => {
                 let comment_suffix = match comment_reload {
                     Ok(added) if added > 0 => {
@@ -1028,7 +1025,8 @@ fn reload_review(app: &mut App) {
                     app.set_message(format!("Reloaded {count} files{comment_suffix}"));
                 }
             }
-            Err(e) => app.set_error(format!("Reload failed: {e}")),
+            Err(e) if !app.last_reload_persistence_failed() => app.set_error(e.to_string()),
+            Err(_) => {}
         }
     }
 }
@@ -1628,10 +1626,13 @@ fn handle_shared_normal_action(app: &mut App, action: Action) {
 
     match action {
         Action::Quit => {
-            if app.dirty && app.session.has_comments() && !app.quit_warned {
+            if app.dirty
+                && (app.session.has_comments() || app.session_save_failed())
+                && !app.quit_warned
+            {
                 app.set_sticky_warning("Unsaved changes. Press q again to quit.");
                 app.quit_warned = true;
-            } else if app.dirty && !app.session.has_comments() {
+            } else if app.dirty && !app.session.has_comments() && !app.session_save_failed() {
                 // Dirty from reviewed-file markers only: discard the state and
                 // quit instead of warning about unsaved changes.
                 app.discard_session_and_quit();

@@ -35,12 +35,19 @@ impl App {
             staged += 1;
         }
         self.set_message(format!("Staged {} reviewed file(s)", staged));
-        if let Err(TuicrError::NoChanges) = self.reload_diff_files() {
-            self.diff_files.clear();
-            self.diff_state = DiffState::default();
-            self.file_list_state = FileListState::default();
-            self.clear_expanded_gaps();
-            self.rebuild_annotations();
+        match self.reload_diff_files() {
+            Err(TuicrError::NoChanges) => {
+                self.diff_files.clear();
+                self.diff_state = DiffState::default();
+                self.file_list_state = FileListState::default();
+                self.clear_expanded_gaps();
+                self.rebuild_annotations();
+            }
+            Err(error) if !self.last_reload_persistence_failed() => {
+                self.set_error(error.to_string())
+            }
+            Err(_) => {}
+            Ok(_) => {}
         }
     }
 

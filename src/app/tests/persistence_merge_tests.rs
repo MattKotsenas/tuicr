@@ -100,3 +100,33 @@ fn should_apply_external_edit_when_comment_is_unchanged_locally() {
         "new"
     );
 }
+
+#[test]
+fn should_merge_external_hunk_review_without_reverting_local_hunk_change() {
+    let mut base = test_session();
+    let review = base.get_file_mut(&PathBuf::from("src/main.rs")).unwrap();
+    review.reviewed_hunks.insert("removed-locally".to_string());
+    let mut current = base.clone();
+    current
+        .get_file_mut(&PathBuf::from("src/main.rs"))
+        .unwrap()
+        .reviewed_hunks
+        .remove("removed-locally");
+    let mut latest = base.clone();
+    latest
+        .get_file_mut(&PathBuf::from("src/main.rs"))
+        .unwrap()
+        .reviewed_hunks
+        .insert("added-externally".to_string());
+
+    let changed = App::merge_external_session_changes(&mut current, &base, &latest);
+
+    assert_eq!(changed, 1);
+    let hunks = &current
+        .files
+        .get(&PathBuf::from("src/main.rs"))
+        .unwrap()
+        .reviewed_hunks;
+    assert!(!hunks.contains("removed-locally"));
+    assert!(hunks.contains("added-externally"));
+}

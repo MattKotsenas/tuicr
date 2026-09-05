@@ -1,5 +1,12 @@
 use super::*;
 
+struct DiffReconciliation {
+    path: PathBuf,
+    status: FileStatus,
+    content_hash: u64,
+    valid_hunks: std::collections::BTreeSet<String>,
+}
+
 impl App {
     /// Slug for the currently active session, derived from the session's
     /// embedded fields. Returns `None` if derivation fails (e.g., a local
@@ -29,6 +36,9 @@ impl App {
             .filter(|path| path.exists())
             .and_then(|path| SessionFileState::from_path(path).ok());
         self.persisted_session_snapshot = self.session.clone();
+        self.session_save_failed = false;
+        self.session_save_conflict = false;
+        self.last_reload_persistence_failed = false;
         if let Err(e) = self.ensure_ephemeral_session_file() {
             self.set_warning(format!("Failed to initialize review session file: {e}"));
         }
@@ -40,6 +50,16 @@ impl App {
         self.session_path = Some(path.clone());
         self.session_file_state = SessionFileState::from_path(&path).ok();
         self.dirty = false;
+        self.session_save_failed = false;
+        self.session_save_conflict = false;
+    }
+
+    pub fn session_save_failed(&self) -> bool {
+        self.session_save_failed
+    }
+
+    pub fn last_reload_persistence_failed(&self) -> bool {
+        self.last_reload_persistence_failed
     }
 
     pub fn ensure_ephemeral_session_file(&mut self) -> Result<Option<PathBuf>> {
@@ -107,26 +127,128 @@ impl App {
             }
         }
         self.dirty = false;
+        self.session_save_failed = false;
+        self.session_save_conflict = false;
         self.should_quit = true;
     }
 
     pub fn save_current_session_merging_external(&mut self) -> Result<PathBuf> {
+        if self.session_save_conflict {
+            return Err(TuicrError::InvalidInput(
+                "reload before saving because persisted review content changed".to_string(),
+            ));
+        }
         let identity = self.session.clone();
         let current = self.session.clone();
         let base = self.persisted_session_snapshot.clone();
-        let (path, saved, _changed) =
-            crate::persistence::storage::save_session_by_identity(&identity, |persisted| {
-                let mut merged = current.clone();
-                if let Some(latest) = persisted.as_ref() {
-                    Self::merge_external_session_changes(&mut merged, &base, latest);
-                }
-                merged.updated_at = Utc::now();
-                Ok((merged, ()))
-            })?;
+        let save = crate::persistence::storage::save_session_by_identity(&identity, |persisted| {
+            let mut merged = current.clone();
+            if let Some(latest) = persisted.as_ref() {
+                Self::merge_external_session_changes(&mut merged, &base, latest);
+            }
+            merged.updated_at = Utc::now();
+            Ok((merged, ()))
+        });
+        let (path, saved, _changed) = match save {
+            Ok(saved) => saved,
+            Err(error) => {
+                self.dirty = true;
+                self.session_save_failed = true;
+                return Err(error);
+            }
+        };
         self.mark_session_saved(path.clone(), saved);
         self.mark_current_session_active_at(&path);
         self.rebuild_annotations();
         Ok(path)
+    }
+
+    pub(in crate::app) fn persist_diff_reconciliation(&mut self) -> Result<()> {
+        self.last_reload_persistence_failed = false;
+        let identity = self.session.clone();
+        let base = self.persisted_session_snapshot.clone();
+        let updates: Vec<_> = self
+            .diff_files
+            .iter()
+            .map(|file| DiffReconciliation {
+                path: file.display_path().clone(),
+                status: file.status,
+                content_hash: file.content_hash,
+                valid_hunks: file.hunk_review_keys().into_iter().collect(),
+            })
+            .collect();
+        let save = crate::persistence::storage::save_session_by_identity(&identity, |persisted| {
+            let mut saved = persisted.unwrap_or_else(|| base.clone());
+            for update in &updates {
+                let review = saved.files.entry(update.path.clone()).or_insert_with(|| {
+                    FileReview::new(update.path.clone(), update.status, update.content_hash)
+                });
+                let base_hash = base
+                    .files
+                    .get(&update.path)
+                    .and_then(|review| review.content_hash);
+                if review.content_hash != base_hash
+                    && review.content_hash != Some(update.content_hash)
+                {
+                    return Err(TuicrError::InvalidInput(
+                        "the persisted review changed again; reload to reconcile it".to_string(),
+                    ));
+                }
+                if review.content_hash != Some(update.content_hash) {
+                    review.reviewed = false;
+                }
+                review.status = update.status;
+                review.content_hash = Some(update.content_hash);
+                review
+                    .reviewed_hunks
+                    .retain(|key| update.valid_hunks.contains(key));
+            }
+            saved.updated_at = Utc::now();
+            Ok((saved, ()))
+        });
+        let (path, saved, ()) = match save {
+            Ok(saved) => saved,
+            Err(error) => {
+                self.dirty = true;
+                self.session_save_failed = true;
+                self.session_save_conflict = matches!(error, TuicrError::InvalidInput(_));
+                self.last_reload_persistence_failed = true;
+                self.set_error(format!(
+                    "Diff reloaded, but review state could not be saved: {error}"
+                ));
+                return Err(error);
+            }
+        };
+
+        let previous = self.persisted_session_snapshot.clone();
+        for update in &updates {
+            let previous_hash = previous
+                .files
+                .get(&update.path)
+                .and_then(|review| review.content_hash);
+            let Some(saved_review) = saved.files.get(&update.path) else {
+                continue;
+            };
+            let Some(current_review) = self.session.files.get_mut(&update.path) else {
+                continue;
+            };
+            if previous_hash != Some(update.content_hash)
+                && current_review.content_hash == Some(update.content_hash)
+                && saved_review.content_hash == Some(update.content_hash)
+            {
+                current_review.reviewed = saved_review.reviewed;
+            }
+        }
+        let changed = Self::merge_external_session_changes(&mut self.session, &previous, &saved);
+        self.persisted_session_snapshot = saved;
+        self.session_path = Some(path.clone());
+        self.session_file_state = SessionFileState::from_path(&path).ok();
+        self.session_save_conflict = false;
+        self.mark_current_session_active_at(&path);
+        if changed > 0 {
+            self.rebuild_annotations();
+        }
+        Ok(())
     }
 
     fn mark_current_session_active_at(&mut self, path: &Path) {
@@ -228,13 +350,45 @@ impl App {
                 continue;
             }
 
-            let base_reviewed = base.files.get(path).map(|review| review.reviewed);
-            if let Some(current_review) = current.files.get_mut(path)
-                && Some(current_review.reviewed) == base_reviewed
-                && current_review.reviewed != latest_review.reviewed
-            {
-                current_review.reviewed = latest_review.reviewed;
-                changed += 1;
+            let base_review = base.files.get(path);
+            if let Some(current_review) = current.files.get_mut(path) {
+                if base_review.is_none()
+                    && current_review.content_hash == latest_review.content_hash
+                {
+                    if current_review.reviewed != latest_review.reviewed {
+                        current_review.reviewed = latest_review.reviewed;
+                        changed += 1;
+                    }
+                    for key in &latest_review.reviewed_hunks {
+                        if current_review.reviewed_hunks.insert(key.clone()) {
+                            changed += 1;
+                        }
+                    }
+                    continue;
+                }
+                if Some(current_review.reviewed) == base_review.map(|review| review.reviewed)
+                    && current_review.reviewed != latest_review.reviewed
+                {
+                    current_review.reviewed = latest_review.reviewed;
+                    changed += 1;
+                }
+
+                if current_review.content_hash == latest_review.content_hash
+                    && let Some(base_hunks) = base_review.map(|review| &review.reviewed_hunks)
+                {
+                    for key in base_hunks.symmetric_difference(&latest_review.reviewed_hunks) {
+                        let current_has = current_review.reviewed_hunks.contains(key);
+                        let base_has = base_hunks.contains(key);
+                        if current_has == base_has {
+                            if latest_review.reviewed_hunks.contains(key) {
+                                current_review.reviewed_hunks.insert(key.clone());
+                            } else {
+                                current_review.reviewed_hunks.remove(key);
+                            }
+                            changed += 1;
+                        }
+                    }
+                }
             }
         }
 

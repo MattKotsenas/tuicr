@@ -164,6 +164,7 @@ impl ReviewSession {
     pub fn add_file(&mut self, path: PathBuf, status: FileStatus, content_hash: u64) -> bool {
         if let Some(review) = self.files.get_mut(&path) {
             let old_hash = review.content_hash;
+            review.status = status;
             review.content_hash = Some(content_hash);
             if review.reviewed && old_hash != Some(content_hash) {
                 review.reviewed = false;
@@ -486,10 +487,11 @@ mod tests {
         let mut session = test_session();
         let path = PathBuf::from("evolving.rs");
         session.add_file(path.clone(), FileStatus::Modified, 100);
-        session.add_file(path.clone(), FileStatus::Modified, 200);
+        session.add_file(path.clone(), FileStatus::Added, 200);
 
         let file = session.files.get(&path).unwrap();
         assert_eq!(file.content_hash, Some(200));
+        assert_eq!(file.status, FileStatus::Added);
     }
 
     /// Snapshot of a session JSON produced before PR 3 landed. New fields

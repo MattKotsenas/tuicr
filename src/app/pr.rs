@@ -539,10 +539,14 @@ impl App {
                     pr_info,
                     &request,
                 ) {
-                    self.set_error(format!("Reload failed: {e}"));
+                    let _ = self.reload_persisted_session_if_changed(true);
+                    if !self.last_reload_persistence_failed() {
+                        self.set_error(e.to_string());
+                    }
                 }
             }
             Err(e) => {
+                let _ = self.reload_persisted_session_if_changed(true);
                 self.set_error(format!("Reload failed: {e}"));
             }
         }
@@ -575,6 +579,7 @@ impl App {
         )?;
 
         let head_changed = opened.details.head_sha != request.head_sha;
+        let mut persistence_error = None;
         if head_changed {
             let details_for_threads = opened.details.clone();
             let opened = self.opened_pr_with_new_head_session(opened)?;
@@ -591,6 +596,7 @@ impl App {
                 self.set_message("Reloaded PR at new head".to_string());
             }
         } else {
+            self.last_reload_persistence_failed = false;
             self.set_pr_last_reviewed_commit_from_metadata(
                 &opened.commits,
                 &opened.review_metadata,
@@ -606,6 +612,7 @@ impl App {
             self.rebuild_annotations();
             self.refetch_pr_threads();
             self.set_message("Reloaded PR (no new commits)".to_string());
+            persistence_error = self.persist_diff_reconciliation().err();
         }
 
         if let Some(line) = request.restore_overview_cursor {
@@ -620,6 +627,9 @@ impl App {
         // panic. Clamp into the current bounds.
         self.diff_state.cursor_line = self.diff_state.cursor_line.min(self.max_cursor_line());
         self.ensure_cursor_visible();
+        if let Some(error) = persistence_error {
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -677,6 +687,7 @@ impl App {
         )?;
 
         let head_changed = opened.details.head_sha != current.key.head_sha;
+        let mut persistence_error = None;
         if head_changed {
             // Save the old-head session before switching so drafts persist.
             let details_for_threads = opened.details.clone();
@@ -686,6 +697,7 @@ impl App {
             // tied to the old session and are dropped here.
             self.spawn_pr_threads_fetch(&details_for_threads, local_checkout.clone());
         } else {
+            self.last_reload_persistence_failed = false;
             // Same head: re-parse the diff to pick up any side-channel
             // changes (rare), but keep the session intact.
             self.set_pr_last_reviewed_commit_from_metadata(
@@ -701,11 +713,15 @@ impl App {
             self.sort_files_by_directory(true);
             self.expand_all_dirs();
             self.rebuild_annotations();
+            persistence_error = self.persist_diff_reconciliation().err();
         }
 
         // Same-head reload keeps the old cursor; clamp it into the (possibly
         // shorter) new diff so a following `cursor_down` can't underflow.
         self.diff_state.cursor_line = self.diff_state.cursor_line.min(self.max_cursor_line());
+        if let Some(error) = persistence_error {
+            return Err(error);
+        }
 
         Ok(head_changed)
     }

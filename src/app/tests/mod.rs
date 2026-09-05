@@ -1,3 +1,31 @@
+pub(super) struct TestReviewsDir {
+    dir: tempfile::TempDir,
+}
+
+impl TestReviewsDir {
+    pub(super) fn new() -> Self {
+        let dir = tempfile::tempdir().expect("failed to create test reviews dir");
+        crate::persistence::storage::set_test_reviews_dir(Some(dir.path().to_path_buf()));
+        Self { dir }
+    }
+
+    pub(super) fn fail_writes(&self) {
+        let path = self.dir.path().join("not-a-directory");
+        std::fs::write(&path, "blocking file").expect("blocking file should be created");
+        crate::persistence::storage::set_test_reviews_dir(Some(path));
+    }
+
+    pub(super) fn restore_writes(&self) {
+        crate::persistence::storage::set_test_reviews_dir(Some(self.dir.path().to_path_buf()));
+    }
+}
+
+impl Drop for TestReviewsDir {
+    fn drop(&mut self) {
+        crate::persistence::storage::set_test_reviews_dir(None);
+    }
+}
+
 mod change_status_tests;
 mod commit_scoped_comment_tests;
 mod commit_selection_tests;
