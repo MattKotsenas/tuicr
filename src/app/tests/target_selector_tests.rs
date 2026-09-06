@@ -1949,6 +1949,56 @@ fn should_keep_reviewed_state_through_finish_pr_reload_when_head_unchanged() {
 }
 
 #[test]
+fn should_persist_review_invalidation_from_same_head_pr_reload() {
+    let _reviews = TestReviewsDir::new();
+    let mut app = build_app();
+    let summary = sample_pr(424254, "same-head-persistence");
+    let mut details = test_pr_details(424254, "same-head-persistence");
+    details.head_sha = "aaaaaaaaaaaaaaaa".to_string();
+    let backend = Box::new(FakeForgeBackend::open_pr_details(
+        details.clone(),
+        two_file_patch("new changed"),
+    ));
+    app.open_pr_with_backend(&summary, backend, None).unwrap();
+    let changed_path = PathBuf::from("src/changed.rs");
+    app.session
+        .get_file_mut(&changed_path)
+        .expect("changed file should be registered")
+        .reviewed = true;
+    let session_path = app
+        .save_current_session_merging_external()
+        .expect("initial PR session should save");
+    let request = PrReloadRequest {
+        repository: details.repository.clone(),
+        pr_number: details.number,
+        head_sha: details.head_sha.clone(),
+        started_at: Instant::now(),
+        anchor: None,
+        restore_overview_cursor: None,
+    };
+
+    app.finish_pr_reload(
+        details.clone(),
+        structured_patch(&two_file_patch("newer changed")),
+        Vec::new(),
+        PullRequestReviewMetadata::default(),
+        crate::forge::traits::PullRequestInfo::from_details(details),
+        &request,
+    )
+    .unwrap();
+
+    let persisted = crate::persistence::storage::load_session(&session_path)
+        .expect("persisted PR session should load");
+    assert!(
+        !persisted
+            .files
+            .get(&changed_path)
+            .expect("changed file should remain registered")
+            .reviewed
+    );
+}
+
+#[test]
 fn should_keep_session_when_pr_head_unchanged_on_reload() {
     // given an app in PR mode
     let mut app = build_app();

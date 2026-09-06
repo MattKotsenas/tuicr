@@ -539,10 +539,12 @@ impl App {
                     pr_info,
                     &request,
                 ) {
+                    let _ = self.reload_persisted_session_if_changed(true);
                     self.set_error(format!("Reload failed: {e}"));
                 }
             }
             Err(e) => {
+                let _ = self.reload_persisted_session_if_changed(true);
                 self.set_error(format!("Reload failed: {e}"));
             }
         }
@@ -591,6 +593,7 @@ impl App {
                 self.set_message("Reloaded PR at new head".to_string());
             }
         } else {
+            self.reconcile_persisted_diff_files(&opened.diff_files)?;
             self.set_pr_last_reviewed_commit_from_metadata(
                 &opened.commits,
                 &opened.review_metadata,
@@ -598,9 +601,6 @@ impl App {
             self.diff_files = opened.diff_files;
             self.pr_info = Some(opened.pr_info);
             self.clear_expanded_gaps();
-            for file in &self.diff_files {
-                self.session.add_diff_file(file);
-            }
             self.sort_files_by_directory(true);
             self.expand_all_dirs();
             self.rebuild_annotations();
@@ -686,6 +686,7 @@ impl App {
             // tied to the old session and are dropped here.
             self.spawn_pr_threads_fetch(&details_for_threads, local_checkout.clone());
         } else {
+            self.reconcile_persisted_diff_files(&opened.diff_files)?;
             // Same head: re-parse the diff to pick up any side-channel
             // changes (rare), but keep the session intact.
             self.set_pr_last_reviewed_commit_from_metadata(
@@ -695,9 +696,6 @@ impl App {
             self.diff_files = opened.diff_files;
             self.pr_info = Some(opened.pr_info);
             self.clear_expanded_gaps();
-            for file in &self.diff_files {
-                self.session.add_diff_file(file);
-            }
             self.sort_files_by_directory(true);
             self.expand_all_dirs();
             self.rebuild_annotations();

@@ -188,6 +188,28 @@ impl ReviewSession {
         invalidated
     }
 
+    pub(crate) fn reconcile_diff_files(&mut self, diff_files: &[DiffFile]) -> (usize, bool) {
+        let mut changed = false;
+        let mut invalidated = 0;
+        for file in diff_files {
+            let path = file.display_path();
+            let valid_hunks: BTreeSet<_> = file.hunk_review_keys().into_iter().collect();
+            changed |= self.files.get(path).is_none_or(|review| {
+                review.status != file.status
+                    || review.content_hash != Some(file.content_hash)
+                    || !review.reviewed_hunks.is_subset(&valid_hunks)
+            });
+            if self.add_diff_file(file) {
+                invalidated += 1;
+            }
+            self.files
+                .get_mut(file.display_path())
+                .expect("reconciled file should be registered")
+                .status = file.status;
+        }
+        (invalidated, changed)
+    }
+
     /// Register a transient filtered diff without dropping hunk keys that
     /// belong to the broader persisted review scope.
     pub fn add_diff_file_preserving_hunks(&mut self, file: &DiffFile) -> bool {
@@ -490,6 +512,29 @@ mod tests {
 
         let file = session.files.get(&path).unwrap();
         assert_eq!(file.content_hash, Some(200));
+    }
+
+    #[test]
+    fn should_update_status_when_reconciling_diff_files() {
+        let mut session = test_session();
+        let path = PathBuf::from("evolving.rs");
+        session.add_file(path.clone(), FileStatus::Modified, 100);
+        let file = DiffFile {
+            old_path: None,
+            new_path: Some(path.clone()),
+            status: FileStatus::Added,
+            hunks: Vec::new(),
+            is_binary: false,
+            is_too_large: false,
+            is_commit_message: false,
+            content_hash: 200,
+        };
+
+        session.reconcile_diff_files(&[file]);
+
+        let file = session.files.get(&path).unwrap();
+        assert_eq!(file.content_hash, Some(200));
+        assert_eq!(file.status, FileStatus::Added);
     }
 
     /// Snapshot of a session JSON produced before PR 3 landed. New fields

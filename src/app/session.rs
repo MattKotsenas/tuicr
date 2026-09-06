@@ -28,7 +28,12 @@ impl App {
             .as_deref()
             .filter(|path| path.exists())
             .and_then(|path| SessionFileState::from_path(path).ok());
-        self.persisted_session_snapshot = self.session.clone();
+        self.persisted_session_snapshot = self
+            .session_path
+            .as_deref()
+            .filter(|path| path.exists())
+            .and_then(|path| crate::persistence::storage::load_session(path).ok())
+            .unwrap_or_else(|| self.session.clone());
         if let Err(e) = self.ensure_ephemeral_session_file() {
             self.set_warning(format!("Failed to initialize review session file: {e}"));
         }
@@ -53,6 +58,9 @@ impl App {
         };
 
         if path.exists() {
+            let diff_files = self.diff_files.clone();
+            self.reconcile_persisted_diff_files(&diff_files)?;
+            self.reload_persisted_session_if_changed(true)?;
             if self.session.pr_session_key.is_some() {
                 crate::persistence::storage::reindex_session(&self.session)?;
             }
@@ -60,7 +68,6 @@ impl App {
                 let saved_path = self.save_current_session_merging_external()?;
                 return Ok(Some(saved_path));
             }
-            self.session_file_state = SessionFileState::from_path(&path).ok();
             self.mark_current_session_active_at(&path);
             return Ok(None);
         }
@@ -127,6 +134,96 @@ impl App {
         self.mark_current_session_active_at(&path);
         self.rebuild_annotations();
         Ok(path)
+    }
+
+    pub(in crate::app) fn reconcile_persisted_diff_files(
+        &mut self,
+        diff_files: &[DiffFile],
+    ) -> Result<(usize, usize)> {
+        let identity = self.session.clone();
+        let base = self.persisted_session_snapshot.clone();
+        let (path, saved, ()) =
+            crate::persistence::storage::update_session_by_identity(&identity, |saved| {
+                for file in diff_files {
+                    let base_hash = base
+                        .files
+                        .get(file.display_path())
+                        .and_then(|review| review.content_hash);
+                    let saved_hash = saved
+                        .files
+                        .get(file.display_path())
+                        .and_then(|review| review.content_hash);
+                    if saved_hash != base_hash && saved_hash != Some(file.content_hash) {
+                        return Err(TuicrError::InvalidInput(
+                            "persisted review content changed during reload".to_string(),
+                        ));
+                    }
+                }
+                let (_, changed) = saved.reconcile_diff_files(diff_files);
+                if changed {
+                    saved.updated_at = Utc::now();
+                }
+                Ok(((), changed))
+            })?;
+        let before_count = Self::comment_count(&self.session);
+        let before_reconciliation = self.session.clone();
+        let (invalidated, _) = self.session.reconcile_diff_files(diff_files);
+        let changed = Self::merge_external_session_changes(&mut self.session, &base, &saved);
+        for file in diff_files {
+            let path = file.display_path();
+            let base_review = base.files.get(path);
+            let Some(saved_review) = saved.files.get(path) else {
+                continue;
+            };
+            let Some(current_review) = self.session.files.get_mut(path) else {
+                continue;
+            };
+
+            let base_hash = base_review.and_then(|review| review.content_hash);
+            let live_review = before_reconciliation.files.get(path);
+            let live_hash = live_review.and_then(|review| review.content_hash);
+            if base_hash != Some(file.content_hash)
+                || live_hash != Some(file.content_hash)
+                || live_review.map(|review| review.reviewed)
+                    == base_review.map(|review| review.reviewed)
+            {
+                current_review.reviewed = saved_review.reviewed;
+            } else if let Some(live_review) = live_review {
+                current_review.reviewed = live_review.reviewed;
+            }
+
+            let valid_hunks: std::collections::BTreeSet<_> =
+                file.hunk_review_keys().into_iter().collect();
+            for key in &valid_hunks {
+                let base_has =
+                    base_review.is_some_and(|review| review.reviewed_hunks.contains(key));
+                let live_has =
+                    live_review.is_some_and(|review| review.reviewed_hunks.contains(key));
+                if live_has == base_has {
+                    if saved_review.reviewed_hunks.contains(key) {
+                        current_review.reviewed_hunks.insert(key.clone());
+                    } else {
+                        current_review.reviewed_hunks.remove(key);
+                    }
+                } else if live_has {
+                    current_review.reviewed_hunks.insert(key.clone());
+                } else {
+                    current_review.reviewed_hunks.remove(key);
+                }
+            }
+        }
+
+        self.persisted_session_snapshot = saved;
+        self.session_path = Some(path.clone());
+        self.session_file_state = SessionFileState::from_path(&path).ok();
+        self.mark_current_session_active_at(&path);
+        if changed > 0 {
+            self.rebuild_annotations();
+        }
+        Ok((
+            invalidated,
+            Self::comment_count(&self.session).saturating_sub(before_count),
+        ))
     }
 
     fn mark_current_session_active_at(&mut self, path: &Path) {

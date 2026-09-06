@@ -429,9 +429,9 @@ impl App {
         for file in &diff_files {
             self.session.add_diff_file(file);
         }
+        self.diff_files = diff_files;
         self.reset_persisted_session_tracking();
 
-        self.diff_files = diff_files;
         self.diff_source = DiffSource::StagedAndUnstaged;
         self.input_mode = InputMode::Normal;
         self.diff_state = DiffState::default();
@@ -469,9 +469,9 @@ impl App {
         for file in &diff_files {
             self.session.add_diff_file(file);
         }
+        self.diff_files = diff_files;
         self.reset_persisted_session_tracking();
 
-        self.diff_files = diff_files;
         self.diff_source = DiffSource::WorkingTree;
         self.input_mode = InputMode::Normal;
         self.diff_state = DiffState::default();
@@ -504,9 +504,9 @@ impl App {
         for file in &diff_files {
             self.session.add_diff_file(file);
         }
+        self.diff_files = diff_files;
         self.reset_persisted_session_tracking();
 
-        self.diff_files = diff_files;
         self.diff_source = DiffSource::Staged;
         self.input_mode = InputMode::Normal;
         self.diff_state = DiffState::default();
@@ -539,9 +539,9 @@ impl App {
         for file in &diff_files {
             self.session.add_diff_file(file);
         }
+        self.diff_files = diff_files;
         self.reset_persisted_session_tracking();
 
-        self.diff_files = diff_files;
         self.diff_source = DiffSource::Unstaged;
         self.input_mode = InputMode::Normal;
         self.diff_state = DiffState::default();
@@ -753,7 +753,11 @@ impl App {
     /// worker fetches off-thread, so it has no such guarantee. Callers
     /// reached from a background result must check relevance first, which
     /// `poll_diff_watch_changes` does via `diff_watch_result_is_stale`.
-    fn apply_diff_files(&mut self, diff_files: Vec<DiffFile>) -> (usize, usize) {
+    fn apply_diff_files(
+        &mut self,
+        diff_files: Vec<DiffFile>,
+        invalidated: usize,
+    ) -> (usize, usize) {
         let current_path = self.current_file_path().cloned();
         let prev_file_idx = self.diff_state.current_file_idx;
         let prev_cursor_line = self.diff_state.cursor_line;
@@ -767,13 +771,6 @@ impl App {
             let start = self.calculate_file_scroll_offset(self.diff_state.current_file_idx);
             prev_cursor_line.saturating_sub(start)
         };
-
-        let mut invalidated = 0;
-        for file in &diff_files {
-            if self.session.add_diff_file(file) {
-                invalidated += 1;
-            }
-        }
 
         self.diff_files = diff_files;
         self.clear_expanded_gaps();
@@ -830,8 +827,31 @@ impl App {
     /// Reloads diff files from disk. Returns `(file_count, invalidated_count)` where
     /// `invalidated_count` is the number of previously reviewed files whose content changed.
     pub fn reload_diff_files(&mut self) -> Result<(usize, usize)> {
+        self.reload_diff_files_with_external_comments()
+            .map(|(count, invalidated, _)| (count, invalidated))
+    }
+
+    pub(crate) fn reload_diff_files_with_external_comments(
+        &mut self,
+    ) -> Result<(usize, usize, usize)> {
         let diff_files = self.fetch_diff_files()?;
-        Ok(self.apply_diff_files(diff_files))
+        self.apply_reloaded_diff_files(diff_files)
+    }
+
+    fn apply_reloaded_diff_files(
+        &mut self,
+        diff_files: Vec<DiffFile>,
+    ) -> Result<(usize, usize, usize)> {
+        if Self::is_strict_commit_selection(self.commit_selection_range, self.review_commits.len())
+        {
+            let added_comments = self.reload_persisted_session_if_changed(true)?;
+            let (invalidated, _) = self.session.reconcile_diff_files(&diff_files);
+            let (count, invalidated) = self.apply_diff_files(diff_files, invalidated);
+            return Ok((count, invalidated, added_comments));
+        }
+        let (invalidated, added_comments) = self.reconcile_persisted_diff_files(&diff_files)?;
+        let outcome = self.apply_diff_files(diff_files, invalidated);
+        Ok((outcome.0, outcome.1, added_comments))
     }
 
     /// Returns the freshly fetched diff only when it differs from what is
@@ -937,9 +957,9 @@ impl App {
         for file in &diff_files {
             self.session.add_diff_file(file);
         }
+        self.diff_files = diff_files;
         self.reset_persisted_session_tracking();
 
-        self.diff_files = diff_files;
         self.diff_source = DiffSource::StagedUnstagedAndCommits(selected_ids);
         self.input_mode = InputMode::Normal;
         self.diff_state = DiffState::default();
@@ -1201,7 +1221,6 @@ impl App {
         ) {
             return false;
         }
-
         let commit_pane_changed = self.apply_fetched_commits(commits, change_status);
 
         // Every arm yields rather than returning early, so a tick that changed
@@ -1241,7 +1260,14 @@ impl App {
         if diff_files_fingerprint(&diff_files) == diff_files_fingerprint(&self.diff_files) {
             return false;
         }
-        let (count, invalidated) = self.apply_diff_files(diff_files);
+        let result = self.apply_reloaded_diff_files(diff_files);
+        let (count, invalidated, _) = match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.set_error(format!("Diff reload failed: {error}"));
+                return true;
+            }
+        };
         match invalidated {
             0 => self.set_message(format!("Reloaded {count} files")),
             changed => self.set_message(format!(

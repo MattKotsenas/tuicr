@@ -1,3 +1,4 @@
+use super::TestReviewsDir;
 use crate::app::diff_load::{
     CommitSelectionAnchor, DiffWatchReporter, DiffWatchTick, diff_watch_result_is_stale,
     normalize_diff_watch_result,
@@ -57,6 +58,10 @@ fn test_vcs_info() -> VcsInfo {
 }
 
 fn build_app(files: Vec<DiffFile>, diff_source: DiffSource) -> App {
+    let reviews_dir =
+        std::env::temp_dir().join(format!("tuicr-diff-watch-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&reviews_dir).expect("failed to create test reviews dir");
+    crate::persistence::storage::set_test_reviews_dir(Some(reviews_dir));
     let vcs_info = test_vcs_info();
     let session = ReviewSession::new(
         vcs_info.root_path.clone(),
@@ -65,7 +70,7 @@ fn build_app(files: Vec<DiffFile>, diff_source: DiffSource) -> App {
         SessionDiffSource::WorkingTree,
     );
 
-    App::build(
+    let mut app = App::build(
         Box::new(StubVcs {
             info: vcs_info.clone(),
         }),
@@ -81,7 +86,10 @@ fn build_app(files: Vec<DiffFile>, diff_source: DiffSource) -> App {
         None,
         None,
     )
-    .expect("failed to build test app")
+    .expect("failed to build test app");
+    app.ensure_ephemeral_session_file()
+        .expect("failed to initialize test session");
+    app
 }
 
 fn test_pull_request_source() -> DiffSource {
@@ -560,6 +568,41 @@ fn should_unmark_a_reviewed_file_when_a_watch_tick_changes_it() {
     );
 }
 
+#[test]
+fn should_persist_review_invalidation_from_watch() {
+    let _reviews = TestReviewsDir::new();
+    let initial = make_diff_file("a.rs", 1);
+    let mut app = build_app(vec![initial.clone()], DiffSource::WorkingTree);
+    app.session
+        .get_file_mut(initial.display_path())
+        .expect("file should be registered")
+        .reviewed = true;
+    let session_path = app
+        .save_current_session_merging_external()
+        .expect("initial session should save");
+
+    deliver(
+        &mut app,
+        working_tree_request(),
+        DiffWatchReloadEvent::Done {
+            request: working_tree_request(),
+            result: Ok(Some(vec![make_diff_file("a.rs", 2)])),
+            change_status: None,
+            commits: None,
+        },
+    );
+
+    let persisted = crate::persistence::storage::load_session(&session_path)
+        .expect("persisted session should load");
+    assert!(
+        !persisted
+            .files
+            .get(initial.display_path())
+            .expect("file should remain registered")
+            .reviewed
+    );
+}
+
 /// The counterpart, and what makes the test above mean anything: clearing
 /// every mark on every tick would satisfy it just as well. A file the tick
 /// did not touch keeps its mark.
@@ -570,6 +613,10 @@ fn should_keep_a_reviewed_file_marked_when_a_watch_tick_changes_a_different_file
         DiffSource::WorkingTree,
     );
     app.toggle_reviewed_for_file_idx(0, false);
+    assert!(
+        app.session.is_file_reviewed(&PathBuf::from("a.rs")),
+        "test setup: a.rs must start reviewed"
+    );
 
     deliver(
         &mut app,

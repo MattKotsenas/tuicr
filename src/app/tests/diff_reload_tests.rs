@@ -1,3 +1,4 @@
+use super::TestReviewsDir;
 use crate::app::*;
 use crate::model::FileStatus;
 use std::cell::RefCell;
@@ -192,6 +193,7 @@ fn make_commit_info(id: &str) -> CommitInfo {
 
 #[test]
 fn should_reload_diff_files_installing_fetched_files() {
+    let _reviews = TestReviewsDir::new();
     let old_file = make_diff_file("old.rs", FileStatus::Modified, 1);
     let fetched = vec![
         make_diff_file("a.rs", FileStatus::Added, 10),
@@ -215,6 +217,419 @@ fn should_reload_diff_files_installing_fetched_files() {
         [PathBuf::from("a.rs"), PathBuf::from("b.rs")]
             .into_iter()
             .collect()
+    );
+}
+
+#[test]
+fn should_persist_reload_invalidation() {
+    let _reviews = TestReviewsDir::new();
+    let initial = make_diff_file("a.rs", FileStatus::Modified, 1);
+    let changed = make_diff_file("a.rs", FileStatus::Modified, 2);
+    let vcs = ScriptedVcs::new();
+    vcs.push_working_tree_diff(Ok(vec![changed]));
+    let mut app = build_app_with_scripted_vcs(vec![initial.clone()], vcs);
+    app.session
+        .files
+        .get_mut(initial.display_path())
+        .expect("file should be registered")
+        .reviewed = true;
+    let session_path = app
+        .save_current_session_merging_external()
+        .expect("initial session should save");
+
+    let (_, invalidated) = app.reload_diff_files().expect("reload should succeed");
+
+    assert_eq!(invalidated, 1);
+    let persisted = crate::persistence::storage::load_session(&session_path)
+        .expect("persisted session should load");
+    let review = persisted
+        .files
+        .get(initial.display_path())
+        .expect("file should remain registered");
+    assert_eq!(review.content_hash, Some(2));
+    assert!(!review.reviewed);
+}
+
+#[test]
+fn should_persist_startup_reconciliation_without_clearing_new_local_mark() {
+    let _reviews = TestReviewsDir::new();
+    let old = make_diff_file("a.rs", FileStatus::Modified, 1);
+    let current = make_diff_file("a.rs", FileStatus::Modified, 2);
+    let vcs = ScriptedVcs::new();
+    vcs.push_working_tree_diff(Ok(vec![current.clone()]));
+    let vcs_info = vcs.info().clone();
+    let mut persisted = ReviewSession::new(
+        vcs_info.root_path.clone(),
+        vcs_info.head_commit.clone(),
+        vcs_info.branch_name.clone(),
+        SessionDiffSource::WorkingTree,
+    );
+    persisted.add_diff_file(&old);
+    persisted
+        .get_file_mut(old.display_path())
+        .expect("file should be registered")
+        .reviewed = true;
+    crate::persistence::storage::save_session(&persisted).expect("persisted session should save");
+    let mut app = App::build(
+        Box::new(vcs),
+        vcs_info.clone(),
+        Theme::dark(),
+        None,
+        false,
+        vec![current],
+        persisted,
+        DiffSource::WorkingTree,
+        InputMode::Normal,
+        Vec::new(),
+        None,
+        None,
+    )
+    .expect("app should build");
+    app.ensure_ephemeral_session_file()
+        .expect("startup reconciliation should persist");
+    app.session
+        .get_file_mut(old.display_path())
+        .expect("file should be registered")
+        .reviewed = true;
+    app.dirty = true;
+
+    app.reload_diff_files().expect("reload should succeed");
+
+    assert!(
+        app.session
+            .files
+            .get(old.display_path())
+            .expect("live file should remain registered")
+            .reviewed
+    );
+    let path = crate::persistence::storage::session_path(&app.session)
+        .expect("session path should resolve");
+    let saved =
+        crate::persistence::storage::load_session(&path).expect("persisted session should load");
+    let review = saved
+        .files
+        .get(old.display_path())
+        .expect("file should remain registered");
+    assert_eq!(review.content_hash, Some(2));
+    assert!(!review.reviewed);
+}
+
+#[test]
+fn should_merge_external_comment_before_tracking_startup_file_state() {
+    let _reviews = TestReviewsDir::new();
+    let file = make_diff_file("a.rs", FileStatus::Modified, 1);
+    let vcs = ScriptedVcs::new();
+    let vcs_info = vcs.info().clone();
+    let mut stale = ReviewSession::new(
+        vcs_info.root_path.clone(),
+        vcs_info.head_commit.clone(),
+        vcs_info.branch_name.clone(),
+        SessionDiffSource::WorkingTree,
+    );
+    stale.add_diff_file(&file);
+    let mut latest = stale.clone();
+    latest
+        .get_file_mut(file.display_path())
+        .expect("file should be registered")
+        .file_comments
+        .push(Comment::new(
+            "external".to_string(),
+            CommentType::from_id("note"),
+            None,
+        ));
+    crate::persistence::storage::save_session(&latest).expect("external session should save");
+    let mut app = App::build(
+        Box::new(vcs),
+        vcs_info,
+        Theme::dark(),
+        None,
+        false,
+        vec![file.clone()],
+        stale,
+        DiffSource::WorkingTree,
+        InputMode::Normal,
+        Vec::new(),
+        None,
+        None,
+    )
+    .expect("app should build");
+
+    app.ensure_ephemeral_session_file()
+        .expect("session initialization should succeed");
+
+    assert_eq!(
+        app.session
+            .files
+            .get(file.display_path())
+            .expect("file should remain registered")
+            .file_comments
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn should_not_save_unrelated_dirty_state_during_reload() {
+    let _reviews = TestReviewsDir::new();
+    let initial_a = make_diff_file("a.rs", FileStatus::Modified, 1);
+    let initial_b = make_diff_file("b.rs", FileStatus::Modified, 1);
+    let changed_a = make_diff_file("a.rs", FileStatus::Modified, 2);
+    let vcs = ScriptedVcs::new();
+    vcs.push_working_tree_diff(Ok(vec![changed_a, initial_b.clone()]));
+    let mut app = build_app_with_scripted_vcs(vec![initial_a.clone(), initial_b.clone()], vcs);
+    let session_path = app
+        .save_current_session_merging_external()
+        .expect("initial session should save");
+    app.session
+        .files
+        .get_mut(initial_b.display_path())
+        .expect("file should be registered")
+        .reviewed = true;
+    app.dirty = true;
+
+    app.reload_diff_files().expect("reload should succeed");
+
+    assert!(app.dirty);
+    let persisted = crate::persistence::storage::load_session(&session_path)
+        .expect("persisted session should load");
+    assert_eq!(
+        persisted
+            .files
+            .get(initial_a.display_path())
+            .expect("changed file should remain registered")
+            .content_hash,
+        Some(2)
+    );
+    assert!(
+        !persisted
+            .files
+            .get(initial_b.display_path())
+            .expect("unchanged file should remain registered")
+            .reviewed
+    );
+}
+
+#[test]
+fn should_merge_external_comments_without_saving_local_comments() {
+    let _reviews = TestReviewsDir::new();
+    let initial_a = make_diff_file("a.rs", FileStatus::Modified, 1);
+    let initial_b = make_diff_file("b.rs", FileStatus::Modified, 1);
+    let changed_a = make_diff_file("a.rs", FileStatus::Modified, 2);
+    let vcs = ScriptedVcs::new();
+    vcs.push_working_tree_diff(Ok(vec![changed_a, initial_b.clone()]));
+    let mut app = build_app_with_scripted_vcs(vec![initial_a.clone(), initial_b.clone()], vcs);
+    let session_path = app
+        .save_current_session_merging_external()
+        .expect("initial session should save");
+    app.session
+        .files
+        .get_mut(initial_b.display_path())
+        .expect("file should be registered")
+        .file_comments
+        .push(Comment::new(
+            "local".to_string(),
+            CommentType::from_id("note"),
+            None,
+        ));
+    app.dirty = true;
+    let mut external = crate::persistence::storage::load_session(&session_path)
+        .expect("persisted session should load");
+    external
+        .files
+        .get_mut(initial_a.display_path())
+        .expect("file should be registered")
+        .file_comments
+        .push(Comment::new(
+            "external".to_string(),
+            CommentType::from_id("note"),
+            None,
+        ));
+    crate::persistence::storage::save_session(&external).expect("external comment should save");
+
+    let (_, _, added_comments) = app
+        .reload_diff_files_with_external_comments()
+        .expect("reload should succeed");
+
+    assert_eq!(added_comments, 1);
+    assert_eq!(
+        app.session
+            .files
+            .get(initial_a.display_path())
+            .expect("file should remain registered")
+            .file_comments
+            .len(),
+        1
+    );
+    assert_eq!(
+        app.session
+            .files
+            .get(initial_b.display_path())
+            .expect("file should remain registered")
+            .file_comments
+            .len(),
+        1
+    );
+    let persisted = crate::persistence::storage::load_session(&session_path)
+        .expect("persisted session should load");
+    assert_eq!(
+        persisted
+            .files
+            .get(initial_a.display_path())
+            .expect("file should remain registered")
+            .file_comments
+            .len(),
+        1
+    );
+    assert!(
+        persisted
+            .files
+            .get(initial_b.display_path())
+            .expect("file should remain registered")
+            .file_comments
+            .is_empty()
+    );
+}
+
+#[test]
+fn should_merge_external_comment_for_narrowed_reload_without_persisting_diff() {
+    let _reviews = TestReviewsDir::new();
+    let initial = make_diff_file("a.rs", FileStatus::Modified, 1);
+    let narrowed = make_diff_file("a.rs", FileStatus::Modified, 2);
+    let vcs = ScriptedVcs::new();
+    vcs.push_commit_range_diff(Ok(vec![narrowed]));
+    let mut app = build_app_with_scripted_vcs(vec![initial.clone()], vcs);
+    app.diff_source = DiffSource::CommitRange(vec!["c1".to_string(), "c2".to_string()]);
+    app.review_commits = vec![make_commit_info("c2"), make_commit_info("c1")];
+    app.commit_selection_range = Some((0, 0));
+    let session_path = app
+        .save_current_session_merging_external()
+        .expect("initial session should save");
+    let mut external = crate::persistence::storage::load_session(&session_path)
+        .expect("persisted session should load");
+    external
+        .get_file_mut(initial.display_path())
+        .expect("file should be registered")
+        .file_comments
+        .push(Comment::new(
+            "external".to_string(),
+            CommentType::from_id("note"),
+            None,
+        ));
+    crate::persistence::storage::save_session(&external).expect("external comment should save");
+
+    let (_, _, added_comments) = app
+        .reload_diff_files_with_external_comments()
+        .expect("reload should succeed");
+
+    assert_eq!(added_comments, 1);
+    assert_eq!(
+        app.session
+            .files
+            .get(initial.display_path())
+            .expect("file should remain registered")
+            .content_hash,
+        Some(2)
+    );
+    let persisted = crate::persistence::storage::load_session(&session_path)
+        .expect("persisted session should load");
+    assert_eq!(
+        persisted
+            .files
+            .get(initial.display_path())
+            .expect("file should remain registered")
+            .content_hash,
+        Some(1)
+    );
+}
+
+#[test]
+fn should_preserve_external_review_of_reloaded_content() {
+    let _reviews = TestReviewsDir::new();
+    let initial = make_diff_file("a.rs", FileStatus::Modified, 1);
+    let changed = make_diff_file("a.rs", FileStatus::Modified, 2);
+    let vcs = ScriptedVcs::new();
+    vcs.push_working_tree_diff(Ok(vec![changed]));
+    let mut app = build_app_with_scripted_vcs(vec![initial.clone()], vcs);
+    app.session
+        .files
+        .get_mut(initial.display_path())
+        .expect("file should be registered")
+        .reviewed = true;
+    let session_path = app
+        .save_current_session_merging_external()
+        .expect("initial session should save");
+    let mut external = crate::persistence::storage::load_session(&session_path)
+        .expect("persisted session should load");
+    let external_review = external
+        .files
+        .get_mut(initial.display_path())
+        .expect("file should be registered");
+    external_review.content_hash = Some(2);
+    external_review.reviewed = true;
+    crate::persistence::storage::save_session(&external).expect("external review should save");
+    app.command_buffer = "e".to_string();
+
+    crate::handler::handle_command_action(&mut app, crate::input::Action::SubmitInput);
+
+    assert!(
+        app.session
+            .files
+            .get(initial.display_path())
+            .expect("file should remain registered")
+            .reviewed
+    );
+}
+
+#[test]
+fn should_preserve_external_review_after_startup_reconciliation() {
+    let _reviews = TestReviewsDir::new();
+    let old = make_diff_file("a.rs", FileStatus::Modified, 1);
+    let current = make_diff_file("a.rs", FileStatus::Modified, 2);
+    let vcs = ScriptedVcs::new();
+    vcs.push_working_tree_diff(Ok(vec![current.clone()]));
+    let vcs_info = vcs.info().clone();
+    let mut persisted = ReviewSession::new(
+        vcs_info.root_path.clone(),
+        vcs_info.head_commit.clone(),
+        vcs_info.branch_name.clone(),
+        SessionDiffSource::WorkingTree,
+    );
+    persisted.add_diff_file(&old);
+    let session_path = crate::persistence::storage::save_session(&persisted)
+        .expect("persisted session should save");
+    let mut app = App::build(
+        Box::new(vcs),
+        vcs_info,
+        Theme::dark(),
+        None,
+        false,
+        vec![current.clone()],
+        persisted,
+        DiffSource::WorkingTree,
+        InputMode::Normal,
+        Vec::new(),
+        None,
+        None,
+    )
+    .expect("app should build");
+    app.ensure_ephemeral_session_file()
+        .expect("startup reconciliation should persist");
+    let mut external = crate::persistence::storage::load_session(&session_path)
+        .expect("persisted session should load");
+    external
+        .get_file_mut(current.display_path())
+        .expect("file should be registered")
+        .reviewed = true;
+    crate::persistence::storage::save_session(&external).expect("external review should save");
+
+    app.reload_diff_files().expect("reload should succeed");
+
+    assert!(
+        app.session
+            .files
+            .get(current.display_path())
+            .expect("file should remain registered")
+            .reviewed
     );
 }
 

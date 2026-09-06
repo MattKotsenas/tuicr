@@ -999,11 +999,7 @@ fn dispatch_command(app: &mut App, kind: CommandKind) -> CommandAfterDispatch {
 }
 
 fn reload_review(app: &mut App) {
-    let comment_reload = app.reload_persisted_session_if_changed(true);
     if matches!(app.diff_source, app::DiffSource::PullRequest(_)) {
-        if let Err(e) = comment_reload {
-            app.set_warning(format!("Comment reload failed: {e}"));
-        }
         // Async: shows a spinner in the status bar; result is applied in
         // `poll_pr_reload_events` and the cursor is restored to the captured
         // anchor.
@@ -1011,14 +1007,12 @@ fn reload_review(app: &mut App) {
             app.set_error(format!("Reload failed: {e}"));
         }
     } else {
-        match app.reload_diff_files() {
-            Ok((count, invalidated)) => {
-                let comment_suffix = match comment_reload {
-                    Ok(added) if added > 0 => {
-                        format!(", loaded {added} external comments")
-                    }
-                    Ok(_) => String::new(),
-                    Err(e) => format!(", comment reload failed: {e}"),
+        match app.reload_diff_files_with_external_comments() {
+            Ok((count, invalidated, added_comments)) => {
+                let comment_suffix = if added_comments > 0 {
+                    format!(", loaded {added_comments} external comments")
+                } else {
+                    String::new()
                 };
                 if invalidated > 0 {
                     app.set_message(format!(

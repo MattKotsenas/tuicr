@@ -1097,11 +1097,8 @@ pub struct App {
     /// once per tick. Cleared on the next successful fetch.
     last_diff_watch_error: Option<String>,
     /// In-flight diff-watch reload spawned by a tick. Guards against a second
-    /// tick spawning while one is already running, and carries the identity
-    /// snapshot checked on receipt. The channel and the snapshot live in one
-    /// value on purpose: as two independent `Option`s they could disagree,
-    /// and a snapshot left behind without its channel blocks every future
-    /// tick from ever spawning again.
+    /// tick spawning while one is already running and carries the identity
+    /// snapshot checked on receipt.
     pub diff_watch_reload: Option<DiffWatchReload>,
     /// Everything `detect_vcs` needs to open a backend the same way the
     /// startup one was opened. The diff-watch worker opens its own, because

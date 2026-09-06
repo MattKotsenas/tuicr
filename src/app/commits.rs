@@ -987,10 +987,10 @@ impl App {
         for file in &diff_files {
             self.session.add_diff_file(file);
         }
+        self.diff_files = diff_files;
         self.reset_persisted_session_tracking();
 
         // Update app state
-        self.diff_files = diff_files;
         self.diff_source = DiffSource::CommitRange(selected_ids);
         self.input_mode = InputMode::Normal;
 

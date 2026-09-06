@@ -105,6 +105,27 @@ pub(crate) fn save_session_by_identity<T>(
     save_session_by_identity_in_dir(identity, &reviews_dir, update)
 }
 
+pub(crate) fn update_session_by_identity<T>(
+    identity: &ReviewSession,
+    update: impl FnOnce(&mut ReviewSession) -> Result<(T, bool)>,
+) -> Result<(PathBuf, ReviewSession, T)> {
+    let reviews_dir = get_reviews_dir()?;
+    maybe_migrate(&reviews_dir)?;
+    with_reviews_dir_lock(&reviews_dir, || {
+        let path = session_path_in_dir(identity, &reviews_dir)?;
+        let mut session = if path.exists() {
+            load_session(&path)?
+        } else {
+            identity.clone()
+        };
+        let (output, changed) = update(&mut session)?;
+        if changed || !path.exists() {
+            save_session_in_dir_unlocked(&session, &reviews_dir)?;
+        }
+        Ok((path, session, output))
+    })
+}
+
 pub(crate) fn save_session_by_identity_in_dir<T>(
     identity: &ReviewSession,
     reviews_dir: &Path,
