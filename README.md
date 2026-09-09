@@ -1,6 +1,6 @@
 # tuicr
 
-**A code review TUI with vim keybindings. Export to GitHub, GitLab, Gitea, Bitbucket, Gerrit, or clipboard.**
+**A code review TUI with vim keybindings. Export to GitHub, GitLab, Gitea, Bitbucket, Azure DevOps, Gerrit, or clipboard.**
 
 [![Crates.io](https://img.shields.io/crates/v/tuicr)](https://crates.io/crates/tuicr)
 [![License](https://img.shields.io/crates/l/tuicr)](./LICENSE)
@@ -16,10 +16,10 @@
 - GitHub-style continuous diff in the terminal. Scroll through every changed file in one stream.
 - PR-style comments at the line, range, file, and review level. 
 - Review tracking at file or hunk granularity, persisted across sessions.
-- Three export targets: push a real review to GitHub, GitLab, Gitea, Bitbucket, or Gerrit, copy
+- Three export targets: push a real review to GitHub, GitLab, Gitea, Bitbucket, Azure DevOps, or Gerrit, copy
   structured markdown to your clipboard, or pipe to stdout.
 - Works with git, jj, and mercurial. Reviews uncommitted changes, commit ranges, or any GitHub PR,
-  GitLab MR, Gitea PR, Bitbucket PR, or Gerrit change.
+  GitLab MR, Gitea PR, Bitbucket PR, Azure DevOps PR, or Gerrit change.
 
 ## Install
 
@@ -79,7 +79,7 @@ tuicr                       # Pick from a commit selector
 tuicr tui                   # Same TUI, explicit subcommand
 tuicr -w                    # Uncommitted changes (skip selector)
 tuicr -r main..HEAD         # Commit range
-tuicr pr 125                # GitHub, Gitea, or Bitbucket PR, or Gerrit change
+tuicr pr 125                # GitHub, Gitea, Bitbucket, or Azure DevOps PR, or Gerrit change
 tuicr mr 125                # GitLab MR
 tuicr tui pr 125            # GitHub PR via explicit TUI subcommand
 tuicr tui mr 125            # GitLab MR via explicit TUI subcommand
@@ -89,11 +89,13 @@ tuicr update                # Update the active installation
 tuicr update 0.18.0         # Install a known-good version
 ```
 
+Every flag, environment variable, and exit code in [docs/CLI.md](docs/CLI.md).
+
 Inside tuicr, navigate with `j`/`k`, press `c` to comment, then `y` to copy the review or
-`:submit` to push it to GitHub, GitLab, Bitbucket, or Gerrit. When reopening a pull request you've
-reviewed before, tuicr preselects commits newer than your latest submitted review when that
-metadata is available; commits already covered by that review are marked with `✓` in the inline
-selector.
+`:submit` to push it to GitHub, GitLab, Gitea, Bitbucket, Azure DevOps, or Gerrit. When reopening a
+pull request you've reviewed before, tuicr preselects commits newer than your latest submitted
+review when that metadata is available; commits already covered by that review are marked with
+`✓` in the inline selector.
 (Bitbucket does not record which commit an approval covered, so that preselection does not apply
 there.)
 Use `:summary` during a review to show every pending local-draft comment. The summary replaces the
@@ -116,6 +118,7 @@ Auto-detects git, jj, or mercurial.
 | Push inline review to GitLab | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Push inline review to Gitea | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Push inline review to Bitbucket | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Push inline review to Azure DevOps | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Push inline review to Gerrit | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Agent-ready markdown export | ✅ | via CLI skill | ❌ | ❌ | ❌ |
 | git | ✅ | ✅ | ✅ | ❌ | ✅ |
@@ -141,10 +144,11 @@ Requires `gh` authenticated to the repo.
 
 ### To GitLab
 
-`:submit` offers Comment, Approve, or Request changes on a GitLab MR. Inline comments post as
-discussion notes. Review-level comments become the summary. Requires `glab` authenticated to the
-host. Request changes needs your account to be an assigned reviewer. Only Draft is GitHub-only
-here. See [docs/GITLAB.md](docs/GITLAB.md) for setup, self-hosted instances, and troubleshooting.
+`:submit` offers Comment, Approve, Request changes, or Draft on a GitLab MR. Inline comments post
+as discussion notes, or as draft notes for Draft. Review-level comments become the summary.
+Requires `glab` authenticated to the host. Request changes needs your account to be an assigned
+reviewer. See [docs/GITLAB.md](docs/GITLAB.md) for setup, self-hosted instances, and
+troubleshooting.
 
 ### To Gitea
 
@@ -312,7 +316,7 @@ A first-session cheatsheet. Press `?` inside tuicr for the full reference.
 | `e` | Open focused file in `$EDITOR` |
 | `y` | Copy review to clipboard |
 | `:edit` | Open focused file in `$EDITOR` |
-| `:submit` | Push review to GitHub, GitLab, Gitea, Bitbucket, or Gerrit |
+| `:submit` | Push review to GitHub, GitLab, Gitea, Bitbucket, Azure DevOps, or Gerrit |
 | `Tab` in `:` prompt | Complete or cycle commands |
 | `?` | Toggle full help |
 
