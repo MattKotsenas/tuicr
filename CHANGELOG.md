@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **file:** Give single-file `--file` reviews target-specific session
+  identities so files in the same directory do not share comments or review
+  state. Existing sessions remain available through `tuicr review list` but
+  are not automatically reopened.
+
 ### Features
 
 - **gerrit:** Add Gerrit Code Review support over the Gerrit REST API (no CLI
@@ -588,4 +595,3 @@ All notable changes to this project will be documented in this file.
 
 - Reload command refreshes diffs w/ scroll preservation and adds :clip export (#23)
 - Add cross-compiled binary builds to release workflow (#33)
-
