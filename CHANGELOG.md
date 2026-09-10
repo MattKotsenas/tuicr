@@ -51,6 +51,13 @@ All notable changes to this project will be documented in this file.
 - Add a CLI reference and correct stale forge claims (#705)
 - **skill:** Correct review comment author guidance (#706)
 
+### Bug Fixes
+
+- **file:** Give single-file `--file` reviews target-specific session
+  identities so files in the same directory do not share comments or review
+  state. Existing sessions remain available through `tuicr review list` but
+  are not automatically reopened.
+
 ### Features
 
 - **export:** Add export.session_header to drop the session slug (#676)
@@ -636,4 +643,3 @@ All notable changes to this project will be documented in this file.
 
 - Reload command refreshes diffs w/ scroll preservation and adds :clip export (#23)
 - Add cross-compiled binary builds to release workflow (#33)
-
