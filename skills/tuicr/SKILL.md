@@ -65,10 +65,10 @@ If the user's intent is ambiguous, ask which workflow they want.
    tuicr review prune --older-than 30d --all --dry-run
    ```
 
-   `rm` rejects an active session and `prune` skips active sessions unless
-   `--force` is passed. Never force-remove an active review unless the user
-   explicitly asked to discard it. After the user accepts a prune preview,
-   rerun the same command without `--dry-run`.
+   `rm` rejects an active session and `prune` skips active sessions, including
+   in dry runs. Ask the user to close the owning TUI before removing its saved
+   session. After the user accepts a prune preview, rerun the same command
+   without `--dry-run`.
 
 3. Choose the session:
    - If the CLI clearly reports exactly one relevant active session with

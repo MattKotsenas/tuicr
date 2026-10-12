@@ -329,7 +329,10 @@ pub enum ReviewCommand {
     },
 
     /// Delete one persisted review session.
-    #[command(alias = "remove")]
+    #[command(
+        alias = "remove",
+        long_about = "Delete one persisted review session. Active sessions are rejected; close their TUI before deleting them."
+    )]
     Rm {
         /// Session slug from `tuicr review list` (local or PR), or path to a
         /// session JSON file.
@@ -344,15 +347,11 @@ pub enum ReviewCommand {
         /// Delete only if the session has no comments or reviewed files/hunks.
         #[arg(long)]
         empty: bool,
-
-        /// Delete an active session instead of rejecting it.
-        #[arg(long)]
-        force: bool,
     },
 
     /// Delete persisted sessions that match an age or emptiness criterion.
     #[command(
-        long_about = "Delete persisted sessions matching exactly one criterion.",
+        long_about = "Delete persisted sessions matching exactly one criterion. Active sessions are skipped, including in dry runs.",
         group(
             ArgGroup::new("criterion")
                 .required(true)
@@ -390,10 +389,6 @@ pub enum ReviewCommand {
         /// Print matching sessions without deleting them.
         #[arg(long)]
         dry_run: bool,
-
-        /// Include active sessions, which are skipped by default.
-        #[arg(long)]
-        force: bool,
     },
 }
 
@@ -1343,6 +1338,24 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_force_for_session_cleanup() {
+        for args in [
+            vec![
+                "tuicr",
+                "review",
+                "rm",
+                "--session",
+                "session.json",
+                "--force",
+            ],
+            vec!["tuicr", "review", "prune", "--empty", "--force"],
+        ] {
+            let err = parse_for_test(&args).expect_err("active-session protection has no override");
+            assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+        }
+    }
+
+    #[test]
     fn should_parse_review_rm_command() {
         let parsed = parse_for_test(&[
             "tuicr",
@@ -1351,7 +1364,6 @@ mod tests {
             "--session",
             "agavra/tuicr@main/worktree",
             "--empty",
-            "--force",
         ])
         .expect("parse should succeed");
         assert_eq!(
@@ -1360,7 +1372,6 @@ mod tests {
                 session: "agavra/tuicr@main/worktree".to_string(),
                 repo: PathBuf::from("."),
                 empty: true,
-                force: true,
             })
         );
     }
@@ -1386,14 +1397,13 @@ mod tests {
                 repo: Some(PathBuf::from("agavra/tuicr")),
                 all: false,
                 dry_run: true,
-                force: false,
             })
         );
     }
 
     #[test]
     fn should_parse_review_prune_empty_all_command() {
-        let parsed = parse_for_test(&["tuicr", "review", "prune", "--empty", "--all", "--force"])
+        let parsed = parse_for_test(&["tuicr", "review", "prune", "--empty", "--all"])
             .expect("parse should succeed");
         assert_eq!(
             parsed.review_command,
@@ -1403,7 +1413,6 @@ mod tests {
                 repo: None,
                 all: true,
                 dry_run: false,
-                force: true,
             })
         );
     }
@@ -1453,7 +1462,8 @@ mod tests {
         assert!(help.contains("matching exactly one criterion"));
         assert!(help.contains("Defaults to the current directory; cannot be combined with --all"));
         assert!(help.contains("across all repositories instead of using --repo"));
-        assert!(help.contains("Include active sessions, which are skipped by default"));
+        assert!(help.contains("Active sessions are skipped, including in dry runs"));
+        assert!(!help.contains("--force"));
     }
 
     #[test]
@@ -1464,6 +1474,8 @@ mod tests {
         let help = err.to_string();
         assert!(help.contains("--empty"));
         assert!(!help.contains("--if-empty"));
+        assert!(help.contains("Active sessions are rejected"));
+        assert!(!help.contains("--force"));
     }
 
     #[test]

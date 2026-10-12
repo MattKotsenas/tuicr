@@ -226,8 +226,7 @@ and print stored comments for agent and script integrations. See
 The TUI creates a persisted session file when a review target becomes active,
 so collaborative tools can add comments immediately. Empty auto-created session
 files are removed when the TUI exits. `tuicr review list` marks currently open
-TUI sessions with `"active": true`; removal refuses or skips those sessions
-unless `--force` is passed.
+TUI sessions with `"active": true`.
 
 Inside the TUI, the review target selector's **Sessions** tab lists the saved
 reviews for the current checkout, so you can resume one by picking it instead of
