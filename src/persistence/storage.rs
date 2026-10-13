@@ -17,7 +17,7 @@
 //! walking `sessions/`.
 
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -206,12 +206,9 @@ fn delete_session_if_empty_unlocked(path: &Path, reviews_dir: &Path) -> Result<b
 /// Whether a live tuicr has `path` open. The caller must hold the reviews-dir
 /// lock, which [`mark_session_active_in_dir`] also takes.
 fn is_session_active_unlocked(reviews_dir: &Path, path: &Path) -> bool {
-    let target = normalize_active_path(path);
-    load_active_sessions_unlocked(reviews_dir)
+    active_session_paths_unlocked(reviews_dir)
         .unwrap_or_default()
-        .sessions
-        .iter()
-        .any(|entry| entry.is_fresh() && normalize_active_path(&entry.path) == target)
+        .contains(&normalize_active_path(path))
 }
 
 /// Delete a session file and its manifest entry unconditionally. Returns
@@ -320,13 +317,8 @@ pub(crate) fn remove_review_session_in_dir(
             return Ok(RemoveSessionOutcome::NotFound);
         }
 
-        let mut active_sessions = load_active_sessions_unlocked(reviews_dir)?;
-        active_sessions.prune_stale();
-        let normalized_path = normalize_active_path(path);
-        let active = active_sessions
-            .sessions
-            .iter()
-            .any(|entry| normalize_active_path(&entry.path) == normalized_path);
+        let active =
+            active_session_paths_unlocked(reviews_dir)?.contains(&normalize_active_path(path));
 
         let (slug, updated_at) = match registered {
             Some((slug, entry)) => (slug, entry.updated_at),
@@ -379,22 +371,26 @@ pub(crate) fn prune_review_sessions_in_dir(
     with_reviews_dir_lock(reviews_dir, || {
         let mut manifest = manifest::load_manifest(reviews_dir).unwrap_or_default();
         let target = selector.map(RepoSelector::resolve);
-        let mut active_sessions = load_active_sessions_unlocked(reviews_dir)?;
-        active_sessions.prune_stale();
-        let active_paths: HashSet<_> = active_sessions
-            .sessions
+        let active_paths = active_session_paths_unlocked(reviews_dir)?;
+        // Capture identities before deleting files; canonicalization may change once they are gone.
+        let normalized_paths: HashMap<_, _> = manifest
             .iter()
-            .map(|entry| normalize_active_path(&entry.path))
+            .map(|(_, entry)| {
+                (
+                    entry.path.clone(),
+                    normalize_active_path(&reviews_dir.join(&entry.path)),
+                )
+            })
             .collect();
 
         let mut candidates = Vec::new();
         for (slug, entry) in manifest.iter() {
             let path = reviews_dir.join(&entry.path);
-            let normalized_path = normalize_active_path(&path);
+            let normalized_path = &normalized_paths[&entry.path];
             let in_scope = target
                 .as_ref()
                 .is_none_or(|target| target.matches(slug, entry));
-            let active = active_paths.contains(&normalized_path);
+            let active = active_paths.contains(normalized_path);
             if !in_scope || active {
                 continue;
             }
@@ -408,23 +404,27 @@ pub(crate) fn prune_review_sessions_in_dir(
                 PruneCriterion::UpdatedBefore(cutoff) => entry.updated_at < cutoff,
             };
             if eligible {
-                candidates.push(SessionCleanupEntry {
-                    slug: slug.clone(),
-                    path,
-                    updated_at: entry.updated_at,
-                    active,
-                });
+                candidates.push((
+                    SessionCleanupEntry {
+                        slug: slug.clone(),
+                        path,
+                        updated_at: entry.updated_at,
+                        active,
+                    },
+                    normalized_path.clone(),
+                ));
             }
         }
-        candidates.sort_by_key(|entry| Reverse(entry.updated_at));
+        candidates.sort_by_key(|(entry, _)| Reverse(entry.updated_at));
 
         if dry_run {
-            return Ok(candidates);
+            return Ok(candidates.into_iter().map(|(entry, _)| entry).collect());
         }
 
         let mut removed = Vec::new();
+        let mut removed_paths = HashSet::new();
         let mut first_error = None;
-        for candidate in candidates {
+        for (candidate, normalized_path) in candidates {
             match fs::remove_file(&candidate.path) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -433,10 +433,14 @@ pub(crate) fn prune_review_sessions_in_dir(
                     break;
                 }
             }
-            remove_manifest_entries_for_path(&mut manifest, reviews_dir, &candidate.path);
+            removed_paths.insert(normalized_path);
             removed.push(candidate);
         }
 
+        manifest.entries.retain(|_, bucket| {
+            bucket.retain(|entry| !removed_paths.contains(&normalized_paths[&entry.path]));
+            !bucket.is_empty()
+        });
         manifest::save_manifest(reviews_dir, &manifest)?;
 
         match first_error {
@@ -525,11 +529,14 @@ pub(crate) fn clear_active_session_for_pid_in_dir(reviews_dir: &Path) -> Result<
 
 pub(crate) fn active_session_paths_in_dir(reviews_dir: &Path) -> Result<HashSet<PathBuf>> {
     maybe_migrate(reviews_dir)?;
-    let active = load_active_sessions_unlocked(reviews_dir).unwrap_or_default();
-    Ok(active
+    Ok(active_session_paths_unlocked(reviews_dir).unwrap_or_default())
+}
+
+fn active_session_paths_unlocked(reviews_dir: &Path) -> Result<HashSet<PathBuf>> {
+    Ok(load_active_sessions_unlocked(reviews_dir)?
         .sessions
         .into_iter()
-        .filter(|entry| entry.is_fresh())
+        .filter(ActiveSessionEntry::is_fresh)
         .map(|entry| normalize_active_path(&entry.path))
         .collect())
 }

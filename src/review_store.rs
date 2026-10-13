@@ -894,6 +894,97 @@ mod tests {
     }
 
     #[test]
+    fn should_prune_all_manifest_aliases_for_a_removed_file() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let other_repo = temp.path().join("other");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&other_repo).unwrap();
+        let reviews_dir = temp.path().join("reviews");
+        let store = ReviewStore::with_reviews_dir(&reviews_dir);
+        let removed_ref = store.save_review(&test_session(repo.clone())).unwrap();
+        let kept_ref = store
+            .save_review(&test_session(other_repo.clone()))
+            .unwrap();
+        let mut manifest = crate::persistence::manifest::load_manifest(&reviews_dir).unwrap();
+        let mut alias = manifest
+            .iter()
+            .find(|(_, entry)| reviews_dir.join(&entry.path) == removed_ref.path())
+            .unwrap()
+            .1
+            .clone();
+        alias.path = PathBuf::from("sessions").join("..").join(alias.path);
+        alias.canonical_repo_path = Some(std::fs::canonicalize(&other_repo).unwrap());
+        assert!(reviews_dir.join(&alias.path).exists());
+        manifest
+            .entries
+            .insert("other@alias/worktree".to_string(), vec![alias]);
+        crate::persistence::manifest::save_manifest(&reviews_dir, &manifest).unwrap();
+        assert_eq!(manifest.len(), 3);
+
+        let removed = store
+            .prune_reviews(Some(&repo), ReviewPruneCriterion::Empty, false)
+            .unwrap();
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].path, removed_ref.path());
+        assert!(!removed_ref.path().exists());
+        assert!(kept_ref.path().exists());
+        let remaining = crate::persistence::manifest::load_manifest(&reviews_dir).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            reviews_dir.join(&remaining.iter().next().unwrap().1.path),
+            kept_ref.path()
+        );
+    }
+
+    #[test]
+    fn should_persist_successful_prune_removals_after_a_later_delete_fails() {
+        let temp = tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let reviews_dir = temp.path().join("reviews");
+        let store = ReviewStore::with_reviews_dir(&reviews_dir);
+        let cutoff = Utc::now();
+        let refs: Vec<_> = (1..=3)
+            .map(|age| {
+                let mut session = test_session(repo.clone());
+                session.branch_name = Some(format!("branch-{age}"));
+                session.updated_at = cutoff - chrono::Duration::days(age);
+                store.save_review(&session).unwrap()
+            })
+            .collect();
+        std::fs::remove_file(refs[1].path()).unwrap();
+        std::fs::create_dir(refs[1].path()).unwrap();
+        assert_eq!(store.list_sessions_for_repo(&repo).unwrap().len(), 3);
+
+        let err = store
+            .prune_reviews(
+                Some(&repo),
+                ReviewPruneCriterion::UpdatedBefore(cutoff),
+                false,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, TuicrError::Io(_)));
+        assert!(!refs[0].path().exists());
+        assert!(refs[1].path().is_dir());
+        assert!(refs[2].path().exists());
+        let remaining = crate::persistence::manifest::load_manifest(&reviews_dir).unwrap();
+        let paths: std::collections::HashSet<_> = remaining
+            .iter()
+            .map(|(_, entry)| reviews_dir.join(&entry.path))
+            .collect();
+        assert_eq!(
+            paths,
+            std::collections::HashSet::from([
+                refs[1].path().to_path_buf(),
+                refs[2].path().to_path_buf()
+            ])
+        );
+    }
+
+    #[test]
     fn should_prune_sessions_older_than_cutoff_with_repo_scope() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
