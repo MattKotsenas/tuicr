@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **file:** Give single-file `--file` reviews target-specific session
+  identities so files in the same directory do not share comments or review
+  state. Existing sessions remain available through `tuicr review list` but
+  are not automatically reopened.
+
 ## [0.27.0] - 2026-09-23
 
 ### Bug Fixes
@@ -50,13 +59,6 @@ All notable changes to this project will be documented in this file.
 - **skill:** Guide agents through seeding comments correctly (#680)
 - Add a CLI reference and correct stale forge claims (#705)
 - **skill:** Correct review comment author guidance (#706)
-
-### Bug Fixes
-
-- **file:** Give single-file `--file` reviews target-specific session
-  identities so files in the same directory do not share comments or review
-  state. Existing sessions remain available through `tuicr review list` but
-  are not automatically reopened.
 
 ### Features
 
@@ -643,3 +645,4 @@ All notable changes to this project will be documented in this file.
 
 - Reload command refreshes diffs w/ scroll preservation and adds :clip export (#23)
 - Add cross-compiled binary builds to release workflow (#33)
+

@@ -30,6 +30,7 @@ fn file_options(path: &str) -> AppStartupOptions<'_> {
         all_files: false,
         show_pr_checks: false,
         show_pr_comments: true,
+        pr_comments_visibility: None,
         git_backend_preference: GitBackendPreference::Libgit2,
         diff_whitespace_mode: DiffWhitespaceMode::Normal,
         commit_selection: CommitSelectionStart::All,
